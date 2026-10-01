@@ -1,0 +1,56 @@
+# Health checks run by the Kusto Monitoring Agent.
+#
+# Contract: each query returns ONE ROW PER PROBLEM.
+#   0 rows  -> OK
+#   1+ rows -> ALERT (the rows are included in the alert)
+#
+# Paste any query into the Azure Data Explorer web UI (https://dataexplorer.azure.com)
+# to see exactly what the agent sees.
+
+checks:
+  - name: high-error-rate
+    severity: critical
+    description: A service returned more than 5% HTTP 5xx in the last 5 minutes.
+    query: |
+      AppTelemetry
+      | where Timestamp > ago(5m)
+      | summarize Requests = count(), Errors = countif(StatusCode >= 500) by Service
+      | extend ErrorRatePct = round(100.0 * Errors / Requests, 2)
+      | where Requests >= 20 and ErrorRatePct > 5
+      | order by ErrorRatePct desc
+
+  - name: high-latency-p95
+    severity: warning
+    description: A service's p95 latency is above 800 ms over the last 5 minutes.
+    query: |
+      AppTelemetry
+      | where Timestamp > ago(5m)
+      | summarize Requests = count(), P95Ms = round(percentile(DurationMs, 95), 1) by Service
+      | where Requests >= 20 and P95Ms > 800
+      | order by P95Ms desc
+
+  - name: service-silent
+    severity: critical
+    description: A service sent telemetry in the last hour but nothing in the last 3 minutes.
+    query: |
+      AppTelemetry
+      | where Timestamp > ago(1h)
+      | summarize LastSeen = max(Timestamp) by Service
+      | where LastSeen < ago(3m)
+      | extend MinutesSilent = round((now() - LastSeen) / 1m, 1)
+      | order by MinutesSilent desc
+
+  - name: error-count-anomaly
+    severity: warning
+    description: Total errors per minute broke away from the learned 3-hour baseline (series_decompose_anomalies).
+    query: |
+      let lookback = 3h;
+      AppTelemetry
+      | where Timestamp > ago(lookback)
+      | make-series Errors = countif(StatusCode >= 500) default = 0
+          on Timestamp from bin(ago(lookback), 1m) to bin(now(), 1m) step 1m
+      | extend (Flags, Score, Baseline) = series_decompose_anomalies(Errors, 3.0, -1, 'linefit')
+      | mv-expand Timestamp to typeof(datetime), Errors to typeof(long),
+          Flags to typeof(int), Score to typeof(double), Baseline to typeof(double)
+      | where Timestamp > ago(6m) and Flags == 1 and Errors >= 10
+      | project Minute = Timestamp, Errors, ExpectedErrors = round(Baseline, 1), Score = round(Score, 2)

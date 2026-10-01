@@ -1,0 +1,4 @@
+azure-kusto-data>=4.6,<7
+azure-identity>=1.17
+PyYAML>=6.0
+requests>=2.31

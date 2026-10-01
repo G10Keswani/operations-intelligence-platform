@@ -1,0 +1,9 @@
+// Same schema as `python -m kusto_monitor.setup_db`, for pasting into the ADX web UI.
+// Run each command separately (select it, then Shift+Enter).
+
+.create-merge table AppTelemetry (Timestamp: datetime, Service: string, Region: string, Endpoint: string, StatusCode: int, DurationMs: real)
+
+.create-merge table MonitorAlerts (Timestamp: datetime, Check: string, Severity: string, Description: string, RowCount: long, Details: dynamic)
+
+// Optional: keep demo data for 30 days only
+.alter-merge table AppTelemetry policy retention softdelete = 30d

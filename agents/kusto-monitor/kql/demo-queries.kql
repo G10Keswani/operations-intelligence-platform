@@ -1,0 +1,39 @@
+// Demo visuals - paste into https://dataexplorer.azure.com (Query tab), select one block, Shift+Enter.
+
+// 1. Traffic per service (last 1h)
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize Requests = count() by Service, bin(Timestamp, 1m)
+| render timechart
+
+// 2. Error rate % per service (the incident line jumps out)
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize ErrorRatePct = round(100.0 * countif(StatusCode >= 500) / count(), 2) by Service, bin(Timestamp, 1m)
+| render timechart
+
+// 3. p95 latency per service
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize P95Ms = percentile(DurationMs, 95) by Service, bin(Timestamp, 1m)
+| render timechart
+
+// 4. What the anomaly check sees: actual vs. learned baseline, anomalies flagged
+let lookback = 3h;
+AppTelemetry
+| where Timestamp > ago(lookback)
+| make-series Errors = countif(StatusCode >= 500) default = 0 on Timestamp from bin(ago(lookback), 1m) to bin(now(), 1m) step 1m
+| extend (Anomalies, Score, Baseline) = series_decompose_anomalies(Errors, 3.0, -1, 'linefit')
+| project Timestamp, Errors, Baseline, Anomalies
+| render anomalychart with (anomalycolumns = Anomalies)
+
+// 5. Alert history written by the agent (RECORD_ALERTS=true / --record-alerts)
+MonitorAlerts
+| order by Timestamp desc
+| project Timestamp, Severity, Check, RowCount, Details
+| take 50
+
+// 6. Alerts per check over time
+MonitorAlerts
+| summarize Alerts = count() by Check, bin(Timestamp, 5m)
+| render columnchart
