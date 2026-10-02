@@ -10,6 +10,9 @@ This guide takes you from nothing to a working **monitoring agent** that:
 The guide includes a **traffic simulator** that injects incidents when you ask it to, so you can
 **demo it live** and **test it automatically**.
 
+> **Prefer no code?** The same agent built only in the Azure portal, with Kusto functions and two Logic Apps (Teams and email alerts), is in
+> [`../kusto-monitor-nocode`](../kusto-monitor-nocode/README.md).
+
 ```
  ┌──────────────────┐   .set-or-append    ┌──────────────────────────────┐
  │ simulate.py      │ ──────────────────▶ │ Azure Data Explorer           │
@@ -122,7 +125,7 @@ pip install -r requirements-dev.txt
 
 ```bash
 pytest -q
-# 20 passed, 5 skipped   <- the 5 skipped are emulator tests (Step 11)
+# 20 passed, 11 skipped   <- the 11 skipped are emulator tests (Step 11)
 ```
 
 > Every command from here on is run from `agents/kusto-monitor/` with the venv active.
@@ -463,12 +466,12 @@ az kusto database-principal-assignment list --cluster-name "$ADX_CLUSTER" --data
 | Suite | Needs | Command | Covers |
 |---|---|---|---|
 | Unit (20 tests) | nothing | `pytest -q` | YAML validation, OK/alert/error logic, exit codes, Teams/Slack payloads, alert-history command, simulator input validation (no KQL injection) |
-| End-to-end (5 tests) | Kusto emulator | see below | **real KQL** for every shipped check: healthy → no alerts; each incident → exactly the expected checks; alert history round-trip |
+| End-to-end (11 tests) | Kusto emulator | see below | **real KQL** for every shipped check: healthy → no alerts; each incident → exactly the expected checks; alert history round-trip. Also replays the [no-code](../kusto-monitor-nocode/README.md) `setup.kql` and what its Logic Apps run |
 
 ```bash
 ./scripts/start-emulator.sh
 KUSTO_EMULATOR_URL=http://localhost:8080 pytest -v
-# 25 passed
+# 31 passed
 ```
 
 The end-to-end tests use their own database (`MonitoringDbTest`), so they won't touch your demo data.

@@ -1,0 +1,87 @@
+.execute database script with (ContinueOnErrors = false) <|
+.create-merge table AppTelemetry (Timestamp: datetime, Service: string, Region: string, Endpoint: string, StatusCode: int, DurationMs: real)
+
+.create-merge table SimulatorSettings (Incident: string, Service: string, UpdatedAt: datetime)
+
+.create-merge table AlertLog (Timestamp: datetime, Severity: string, Check: string, Summary: string)
+
+.create-or-alter function with (folder = "Simulator", docstring = "Synthetic traffic for 4 services; incident = none | error-spike | latency | outage")
+GenerateTraffic(startTime: datetime, endTime: datetime, incident: string, incidentService: string) {
+    range Timestamp from startTime to endTime step 250ms
+    | where Timestamp < endTime
+    | extend Service = tostring(dynamic(["checkout", "payments", "catalog", "auth"])[toint(rand() * 4)])
+    | extend Region = tostring(dynamic(["eastus", "westeurope"])[toint(rand() * 2)])
+    | extend Affected = Service == incidentService
+    | extend StatusCode = toint(iff(rand() < iff(Affected and incident == "error-spike", 0.40, 0.01), 500, 200))
+    | extend DurationMs = round(40.0 + rand() * 160.0 + iff(rand() < 0.02, rand() * 600.0, 0.0)
+        + iff(Affected and incident == "latency", 1500.0, 0.0), 1)
+    | where not(Affected and incident == "outage")
+    | project Timestamp, Service, Region, Endpoint = strcat("/api/", Service), StatusCode, DurationMs
+}
+
+.create-or-alter function with (folder = "Simulator", docstring = "Traffic since the last batch, using the newest SimulatorSettings row")
+NextTrafficBatch() {
+    let lastSeen = toscalar(AppTelemetry | summarize max(Timestamp));
+    let startTime = iff(isnull(lastSeen) or lastSeen < ago(10m), ago(1m), lastSeen + 250ms);
+    let settings = SimulatorSettings | top 1 by UpdatedAt desc;
+    let incident = coalesce(toscalar(settings | project Incident), "none");
+    let incidentService = coalesce(toscalar(settings | project Service), "payments");
+    GenerateTraffic(startTime, now(), incident, incidentService)
+}
+
+.create-or-alter function with (folder = "Checks", docstring = "Service with more than 5% HTTP 5xx in the last 5 min")
+CheckHighErrorRate() {
+    AppTelemetry
+    | where Timestamp > ago(5m)
+    | summarize Requests = count(), Errors = countif(StatusCode >= 500) by Service
+    | extend ErrorRatePct = round(100.0 * Errors / Requests, 2)
+    | where Requests >= 20 and ErrorRatePct > 5
+    | project Check = "high-error-rate", Severity = "critical",
+        Summary = strcat(Service, ": ", ErrorRatePct, "% errors (", Errors, " of ", Requests, " requests in the last 5 min)")
+}
+
+.create-or-alter function with (folder = "Checks", docstring = "Service with p95 latency above 800 ms in the last 5 min")
+CheckHighLatency() {
+    AppTelemetry
+    | where Timestamp > ago(5m)
+    | summarize Requests = count(), P95Ms = tolong(percentile(DurationMs, 95)) by Service
+    | where Requests >= 20 and P95Ms > 800
+    | project Check = "high-latency-p95", Severity = "warning",
+        Summary = strcat(Service, ": p95 latency ", P95Ms, " ms in the last 5 min (limit 800 ms)")
+}
+
+.create-or-alter function with (folder = "Checks", docstring = "Service seen in the last hour but silent for 3+ min")
+CheckServiceSilent() {
+    AppTelemetry
+    | where Timestamp > ago(1h)
+    | summarize LastSeen = max(Timestamp) by Service
+    | where LastSeen < ago(3m)
+    | project Check = "service-silent", Severity = "critical",
+        Summary = strcat(Service, ": no telemetry for ", round((now() - LastSeen) / 1m, 1), " min (last seen ", format_datetime(LastSeen, "HH:mm"), " UTC)")
+}
+
+.create-or-alter function with (folder = "Checks", docstring = "Errors per minute far above the learned 3-hour baseline")
+CheckErrorAnomaly() {
+    let lookback = 3h;
+    AppTelemetry
+    | where Timestamp > ago(lookback)
+    | make-series Errors = countif(StatusCode >= 500) default = 0
+        on Timestamp from bin(ago(lookback), 1m) to bin(now(), 1m) step 1m
+    | extend (Flags, Score, Baseline) = series_decompose_anomalies(Errors, 3.0, -1, "linefit")
+    | mv-expand Timestamp to typeof(datetime), Errors to typeof(long), Flags to typeof(int), Baseline to typeof(double)
+    | where Timestamp > ago(6m) and Flags == 1 and Errors >= 10
+    | summarize Minutes = count(), PeakErrors = max(Errors), Expected = round(avg(Baseline), 1)
+    | where Minutes > 0
+    | project Check = "error-count-anomaly", Severity = "warning",
+        Summary = strcat("Errors/min spiked to ", PeakErrors, " (expected about ", Expected, ") in ", Minutes, " of the last 5 minutes")
+}
+
+.create-or-alter function with (folder = "Checks", docstring = "All checks. 0 rows = healthy. This is what the Logic App runs.")
+RunAllChecks() {
+    union CheckHighErrorRate(), CheckHighLatency(), CheckServiceSilent(), CheckErrorAnomaly()
+    | extend SeverityRank = case(Severity == "critical", 1, Severity == "warning", 2, 3)
+    | order by SeverityRank asc, Check asc
+    | project Timestamp = now(), Severity, Check, Summary
+}
+
+.set-or-append SimulatorSettings <| print Incident = "none", Service = "payments", UpdatedAt = now()

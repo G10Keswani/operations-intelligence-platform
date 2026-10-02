@@ -1,0 +1,63 @@
+// Demo commands for the no-code Kusto Monitoring Agent.
+// Click inside ONE block (the lines between blank lines) and press Run (Shift+Enter).
+
+// ---------- 1. One-time: 6 hours of healthy history (the anomaly check learns from it)
+
+.set-or-append AppTelemetry <| GenerateTraffic(ago(6h), now(), "none", "payments")
+
+// ---------- 2. Inject an incident (the Traffic Generator Logic App picks it up within 1 minute)
+
+.set-or-append SimulatorSettings <| print Incident = "error-spike", Service = "payments", UpdatedAt = now()
+
+.set-or-append SimulatorSettings <| print Incident = "latency", Service = "checkout", UpdatedAt = now()
+
+.set-or-append SimulatorSettings <| print Incident = "outage", Service = "auth", UpdatedAt = now()
+
+// ---------- 3. Back to healthy
+
+.set-or-append SimulatorSettings <| print Incident = "none", Service = "payments", UpdatedAt = now()
+
+// ---------- 4. What is the simulator doing right now?
+
+SimulatorSettings
+| top 1 by UpdatedAt desc
+
+// ---------- 5. What does the agent see? (0 rows = healthy)
+
+RunAllChecks()
+
+// ---------- 6. Alert history written by the Monitor Agent Logic App
+
+AlertLog
+| order by Timestamp desc
+| take 50
+
+// ---------- 7. Charts for the demo
+
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize Requests = count() by Service, bin(Timestamp, 1m)
+| render timechart
+
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize ErrorRatePct = round(100.0 * countif(StatusCode >= 500) / count(), 2) by Service, bin(Timestamp, 1m)
+| render timechart
+
+AppTelemetry
+| where Timestamp > ago(1h)
+| summarize P95Ms = percentile(DurationMs, 95) by Service, bin(Timestamp, 1m)
+| render timechart
+
+AppTelemetry
+| where Timestamp > ago(3h)
+| make-series Errors = countif(StatusCode >= 500) default = 0 on Timestamp from bin(ago(3h), 1m) to bin(now(), 1m) step 1m
+| extend (Anomalies, Score, Baseline) = series_decompose_anomalies(Errors, 3.0, -1, "linefit")
+| project Timestamp, Errors, Baseline, Anomalies
+| render anomalychart with (anomalycolumns = Anomalies)
+
+// ---------- 8. Reset demo data (keeps tables and functions)
+
+.clear table AppTelemetry data
+
+.clear table AlertLog data
